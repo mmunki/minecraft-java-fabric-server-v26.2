@@ -1,0 +1,33 @@
+services:
+  minecraft:
+    image: itzg/minecraft-server:java25
+    container_name: mc
+    environment:
+      EULA: "TRUE"
+      TYPE: "FABRIC"
+      VERSION: "26.2"
+      ONLINE_MODE: "${ONLINE_MODE:-false}"
+      SEED: "${SEED:-}"
+      MEMORY: "4G"
+      MAX_PLAYERS: "${MAX_PLAYERS:-10}"
+      MOTD: "Fabric 26.2 test server - Playit.gg"
+      DIFFICULTY: "normal"
+      VIEW_DISTANCE: "6"
+      SIMULATION_DISTANCE: "4"
+      SPAWN_PROTECTION: "0"
+      TZ: "UTC"
+    ports:
+      - "25565:25565"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+
+  playit:
+    image: ghcr.io/playit-cloud/playit-agent:latest
+    container_name: playit
+    network_mode: host
+    environment:
+      SECRET_KEY: "${PLAYIT_SECRET}"
+    depends_on:
+      - minecraft
+    restart: unless-stopped

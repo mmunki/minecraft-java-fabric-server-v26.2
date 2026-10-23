@@ -1,0 +1,170 @@
+name: minecraft-server
+
+# Starts a temporary Minecraft Java Fabric 26.2 server and exposes it through
+# Playit.gg.  GitHub Actions is not a 24/7 host: the server lives only for the
+# duration of this job (max 330 minutes).  For a permanent server use the
+# docker-compose.yml on a VPS.
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: "How long to keep the server online (1-330)"
+        default: "180"
+        type: string
+      online_mode:
+        description: "true = Microsoft accounts only; false = anyone can join"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      max_players:
+        description: "Maximum players"
+        default: "10"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-server
+  cancel-in-progress: false
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      ONLINE_MODE: ${{ inputs.online_mode }}
+      MAX_PLAYERS: ${{ inputs.max_players }}
+      DURATION_MINUTES: ${{ inputs.duration_minutes }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Generate a random seed
+        run: |
+          set -euo pipefail
+          echo "SEED=$(openssl rand -hex 8)" >> "$GITHUB_ENV"
+          echo "Random seed: $(grep '^SEED=' "$GITHUB_ENV" | cut -d= -f2)"
+
+      - name: Start Fabric 26.2
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          docker rm -f mc >/dev/null 2>&1 || true
+          docker run -d --name mc --net=host \
+            -e EULA=TRUE \
+            -e TYPE=FABRIC \
+            -e VERSION=26.2 \
+            -e ONLINE_MODE="$ONLINE_MODE" \
+            -e SEED="$SEED" \
+            -e MEMORY=4G \
+            -e MAX_PLAYERS="$MAX_PLAYERS" \
+            -e MOTD="Fabric 26.2 test server - Playit.gg" \
+            -e DIFFICULTY=normal \
+            -e VIEW_DISTANCE=6 \
+            -e SIMULATION_DISTANCE=4 \
+            -e SPAWN_PROTECTION=0 \
+            -e TZ=UTC \
+            -v "$PWD/data:/data" \
+            itzg/minecraft-server:java25
+
+          echo "waiting for the server to finish starting..."
+          ready=false
+          for i in $(seq 1 240); do
+            if docker logs mc 2>&1 | grep -q 'Done ('; then
+              ready=true
+              break
+            fi
+            if ! docker inspect -f '{{.State.Running}}' mc 2>/dev/null | grep -q true; then
+              echo "server container stopped"
+              docker logs mc || true
+              exit 1
+            fi
+            sleep 5
+          done
+
+          docker logs mc 2>&1 | tail -50
+          if [ "$ready" != "true" ]; then
+            echo "::error::server did not become ready in 10 minutes"
+            exit 1
+          fi
+          echo "server is ready"
+
+      - name: Start the Playit.gg tunnel
+        env:
+          PLAYIT_SECRET: ${{ secrets.PLAYIT_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PLAYIT_SECRET:-}" ]; then
+            echo "::error::PLAYIT_SECRET is not set on this repository"
+            exit 1
+          fi
+
+          docker rm -f playit >/dev/null 2>&1 || true
+          docker run -d --name playit --net=host \
+            -e SECRET_KEY="$PLAYIT_SECRET" \
+            ghcr.io/playit-cloud/playit-agent:latest
+
+          echo "waiting for the tunnel..."
+          sleep 25
+          docker logs playit 2>&1 | tee playit.log || true
+
+          addr="$(grep -Eo '[a-zA-Z0-9.-]+\.(joinmc\.link|playit\.gg|ply\.gg)' playit.log | sort -u | head -1 || true)"
+          if [ -n "$addr" ]; then
+            echo "JOIN_ADDRESS=$addr" >> "$GITHUB_ENV"
+            echo "### Join address: \`$addr\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::could not detect the tunnel address in the agent log"
+            echo "Open https://playit.gg/account/tunnels to see the assigned address."
+          fi
+
+          {
+            echo "### Minecraft Fabric 26.2"
+            echo ""
+            echo "- Seed: \`$SEED\`"
+            echo "- Online mode: \`$ONLINE_MODE\`"
+            echo "- Max players: \`$MAX_PLAYERS\`"
+            echo "- Duration: \`${DURATION_MINUTES:-180}\` minutes"
+            if [ -n "$addr" ]; then echo "- Join: \`$addr\`"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the server online
+        run: |
+          set -euo pipefail
+          minutes="${DURATION_MINUTES:-180}"
+          if ! [[ "$minutes" =~ ^[0-9]+$ ]]; then minutes=180; fi
+          if [ "$minutes" -lt 1 ]; then minutes=1; fi
+          if [ "$minutes" -gt 330 ]; then minutes=330; fi
+
+          echo "keeping the server online for $minutes minutes"
+          end=$((SECONDS + minutes * 60))
+          while [ "$SECONDS" -lt "$end" ]; do
+            if ! docker inspect -f '{{.State.Running}}' mc 2>/dev/null | grep -q true; then
+              echo "server stopped"
+              break
+            fi
+            sleep 30
+          done
+
+      - name: Save logs
+        if: always()
+        run: |
+          docker logs mc > server.log 2>&1 || true
+          docker logs playit > playit.log 2>&1 || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcserver-logs
+          path: |
+            server.log
+            playit.log
+          if-no-files-found: warn
+
+      - name: Stop the containers
+        if: always()
+        run: |
+          docker rm -f playit mc >/dev/null 2>&1 || true
