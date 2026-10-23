@@ -1,0 +1,205 @@
+name: playit-link-test
+
+# Diagnostic workflow for the Playit.gg "third-party app" setup code.
+#
+# A 32-character hex code from
+#   https://playit.gg/account/setup/wizard/new-account/third-party/third-party-select
+# is a *setup code for a third-party app* (SquidServers, etc.).  It is not an
+# agent SECRET_KEY and it is not a tunnel address.  The third-party app has to
+# consume it while it is fresh.  This workflow proves what the code is by trying
+# every public Playit path and reports the result.
+#
+# It reads the code from the repository secret PLAYIT_SETUP_CODE, or falls back
+# to PLAYIT_SECRET.  Never commit the code to the repository.
+
+on:
+  workflow_dispatch:
+    inputs:
+      wait_seconds:
+        description: "Seconds to wait for browser approval if this is a claim code"
+        default: "60"
+        type: string
+      run_agent:
+        description: "Also try the code as an agent SECRET_KEY"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PLAYIT_CODE: ${{ secrets.PLAYIT_SETUP_CODE || secrets.PLAYIT_SECRET }}
+      WAIT_SECONDS: ${{ inputs.wait_seconds }}
+      RUN_AGENT: ${{ inputs.run_agent }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Inspect the code
+        run: |
+          set -euo pipefail
+          if [ -z "${PLAYIT_CODE:-}" ]; then
+            echo "::error::Set the repository secret PLAYIT_SETUP_CODE (or PLAYIT_SECRET)."
+            exit 1
+          fi
+          echo "::add-mask::$PLAYIT_CODE"
+
+          len=${#PLAYIT_CODE}
+          hex=no
+          if [[ "$PLAYIT_CODE" =~ ^[0-9a-fA-F]+$ ]]; then hex=yes; fi
+          echo "code_length=$len" | tee inspect.log
+          echo "hex=$hex" | tee -a inspect.log
+          echo "fingerprint=$(printf '%s' "$PLAYIT_CODE" | sha256sum | cut -c1-12)" | tee -a inspect.log
+
+          if [ "$len" -eq 32 ] && [ "$hex" = yes ]; then
+            echo "classification=32-hex Playit third-party setup code (or agent secret)" | tee -a inspect.log
+          elif [ "$len" -eq 10 ] && [ "$hex" = yes ]; then
+            echo "classification=10-hex Playit claim code" | tee -a inspect.log
+          else
+            echo "classification=unknown" | tee -a inspect.log
+          fi
+
+          echo "PLAYIT_CODE=$PLAYIT_CODE" >> "$GITHUB_ENV"
+
+      - name: Try the claim/setup API
+        run: |
+          set -euo pipefail
+          : > claim-setup.log
+          for type in assignable self-managed; do
+            echo "--- /claim/setup agent_type=$type ---" | tee -a claim-setup.log
+            curl -sS -X POST https://api.playit.gg/claim/setup \
+              -H 'Content-Type: application/json' \
+              -d "{\"code\":\"$PLAYIT_CODE\",\"agent_type\":\"$type\",\"version\":\"playit 1.0.12\"}" \
+              | tee -a claim-setup.log
+            echo | tee -a claim-setup.log
+          done
+
+      - name: Try the claim/exchange API
+        run: |
+          set -euo pipefail
+          : > claim-exchange.log
+          resp="$(curl -sS -X POST https://api.playit.gg/claim/exchange \
+            -H 'Content-Type: application/json' \
+            -d "{\"code\":\"$PLAYIT_CODE\"}")"
+          printf '%s\n' "$resp" | tee -a claim-exchange.log
+          if printf '%s' "$resp" | grep -q '"status":"success"'; then
+            secret="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["secret_key"])')"
+            echo "::add-mask::$secret"
+            echo "PLAYIT_SECRET_FROM_CLAIM=$secret" >> "$GITHUB_ENV"
+            echo "LINKED=true" >> "$GITHUB_ENV"
+          fi
+
+      - name: Try the code as an agent SECRET_KEY
+        if: env.RUN_AGENT == 'true' && env.LINKED != 'true'
+        run: |
+          set -euo pipefail
+          docker rm -f playit-test >/dev/null 2>&1 || true
+          docker run -d --name playit-test --net=host \
+            -e SECRET_KEY="$PLAYIT_CODE" \
+            ghcr.io/playit-cloud/playit-agent:latest
+          sleep 20
+          docker logs playit-test > agent.log 2>&1 || true
+          cat agent.log
+          if grep -q 'InvalidAgentKey' agent.log; then
+            echo "agent_key=invalid" | tee agent-result.log
+          elif grep -qE 'agent registered|tunnel|connected' agent.log; then
+            echo "agent_key=accepted" | tee agent-result.log
+            echo "LINKED=true" >> "$GITHUB_ENV"
+          else
+            echo "agent_key=unknown" | tee agent-result.log
+          fi
+
+      - name: Wait for browser approval
+        if: env.LINKED != 'true'
+        run: |
+          set -euo pipefail
+          seconds="${WAIT_SECONDS:-60}"
+          if ! [[ "$seconds" =~ ^[0-9]+$ ]]; then seconds=60; fi
+          echo "If this is a claim code, open https://playit.gg/claim/ and enter it."
+          echo "waiting up to $seconds seconds for approval..."
+          end=$((SECONDS + seconds))
+          while [ "$SECONDS" -lt "$end" ]; do
+            resp="$(curl -sS -X POST https://api.playit.gg/claim/exchange \
+              -H 'Content-Type: application/json' \
+              -d "{\"code\":\"$PLAYIT_CODE\"}")"
+            printf '%s\n' "$resp" >> claim-exchange.log
+            if printf '%s' "$resp" | grep -q '"status":"success"'; then
+              secret="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["secret_key"])')"
+              echo "::add-mask::$secret"
+              echo "PLAYIT_SECRET_FROM_CLAIM=$secret" >> "$GITHUB_ENV"
+              echo "LINKED=true" >> "$GITHUB_ENV"
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Run the agent with a linked secret
+        if: env.LINKED == 'true' && env.RUN_AGENT == 'true'
+        run: |
+          set -euo pipefail
+          secret="${PLAYIT_SECRET_FROM_CLAIM:-$PLAYIT_CODE}"
+          echo "::add-mask::$secret"
+          docker rm -f playit-test >/dev/null 2>&1 || true
+          docker run -d --name playit-test --net=host \
+            -e SECRET_KEY="$secret" \
+            ghcr.io/playit-cloud/playit-agent:latest
+          sleep 20
+          docker logs playit-test 2>&1 | tee -a agent.log || true
+
+      - name: Summarize
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "### Playit link test"
+            echo ""
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| Code length | \`${#PLAYIT_CODE}\` |"
+            echo "| Claim setup | \`$(tr -d '\n' < claim-setup.log 2>/dev/null || echo 'n/a')\` |"
+            echo "| Claim exchange | \`$(tail -1 claim-exchange.log 2>/dev/null || echo 'n/a')\` |"
+            echo "| Agent auth | \`$(cat agent-result.log 2>/dev/null || echo 'not run')\` |"
+            echo "| Linked | \`${LINKED:-false}\` |"
+            echo ""
+            if [ "${LINKED:-false}" = "true" ]; then
+              echo "A secret key was obtained. The workflow can now run the Playit agent."
+            else
+              echo "This code was not usable as a claim code or an agent SECRET_KEY."
+              echo ""
+              echo "A 32-hex code from the third-party wizard is a **third-party setup code**."
+              echo "It must be pasted into the third-party app (for example SquidServers) while it is fresh."
+              echo "It expires quickly and cannot be used as \`SECRET_KEY\`."
+              echo ""
+              echo "For this GitHub-hosted Minecraft server, generate a **Docker agent secret** at"
+              echo "https://playit.gg/account/setup/wizard/new-account/docker/docker-name"
+              echo "and save it as the repository secret \`PLAYIT_SECRET\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playit-link-test-logs
+          path: |
+            inspect.log
+            claim-setup.log
+            claim-exchange.log
+            agent.log
+            agent-result.log
+          if-no-files-found: warn
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f playit-test >/dev/null 2>&1 || true
+
+      - name: Fail when nothing linked
+        if: always() && env.LINKED != 'true'
+        run: |
+          echo "::error::This code did not link. See the job summary for the correct code type and next steps."
+          exit 1

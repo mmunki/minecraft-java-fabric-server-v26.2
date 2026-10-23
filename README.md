@@ -52,14 +52,60 @@ Minecraft container. The assigned address is shown in:
 docker compose logs playit
 ```
 
-## Playit secret
+## Playit code types (important)
 
-The workflow reads the repository secret **`PLAYIT_SECRET`**. It is never
-committed. For a local server, export it as an environment variable.
+Playit uses several different codes and they are **not interchangeable**:
+
+| Code | Shape | What it is | Where it goes |
+| --- | --- | --- | --- |
+| Docker agent secret | 32 hex | The key that authenticates an agent | Repository secret `PLAYIT_SECRET` |
+| Third-party setup code | 32 hex | A short-lived code from the **Third Party App** wizard | The third-party app (e.g. SquidServers), **not** `SECRET_KEY` |
+| Claim code | 10 hex | A code from `playit claim generate` | Browser approval at `https://playit.gg/claim/` |
+| Tunnel address | `*.joinmc.link` etc. | The public hostname players connect to | Minecraft “Add Server” |
+
+A code from the **Third Party App** wizard is **not** an agent secret, **not**
+a tunnel address, and it expires quickly. It has to be pasted into the
+third-party app that generated the workflow. It cannot be used as
+`SECRET_KEY`; the agent will answer `InvalidAgentKey`.
+
+### Get a Docker agent secret for this repo
+
+1. Open the
+   [Docker agent wizard](https://playit.gg/account/setup/wizard/new-account/docker/docker-name)
+   while signed in.
+2. Copy the **secret key** it shows.
+3. Save it as the repository secret:
+
+```bash
+gh secret set PLAYIT_SECRET \
+  --repo mmunki/minecraft-java-fabric-server-v26.2 \
+  --body '<secret key>'
+```
+
+The workflow reads **`PLAYIT_SECRET`**. It is never committed.
 
 Create or manage the tunnel at
 [playit.gg/account/tunnels](https://playit.gg/account/tunnels). The tunnel must
 point to `127.0.0.1:25565` (TCP, Minecraft Java).
+
+### Diagnose a code
+
+Run **Actions → playit-link-test → Run workflow**. It reads
+`PLAYIT_SETUP_CODE` first, then falls back to `PLAYIT_SECRET`, and tests:
+
+- `/claim/setup` and `/claim/exchange` (claim-code path)
+- the code as an agent `SECRET_KEY` (Docker agent)
+- browser-approval polling for a claim code
+
+It writes `inspect.log`, `claim-setup.log`, `claim-exchange.log`, and
+`agent.log` to the run artifact and the job summary. A third-party setup code
+is expected to fail this test; the summary explains the correct next step.
+
+```bash
+gh secret set PLAYIT_SETUP_CODE \
+  --repo mmunki/minecraft-java-fabric-server-v26.2 \
+  --body '<fresh setup code>'
+```
 
 > The Playit **Fabric mod** only supports Minecraft up to 1.21.1, so this uses
 > the Playit **agent** instead. The agent works with 26.2.
@@ -76,6 +122,7 @@ point to `127.0.0.1:25565` (TCP, Minecraft Java).
 
 ```
 .github/workflows/server.yml   temporary GitHub Actions server
+.github/workflows/test.yml     Playit code / agent-linking diagnostic
 docker-compose.yml              permanent VPS/home server + Playit agent
 ```
 
