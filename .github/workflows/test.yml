@@ -101,7 +101,7 @@ jobs:
           docker rm -f playit-test >/dev/null 2>&1 || true
           docker run -d --name playit-test --net=host \
             -e SECRET_KEY="$PLAYIT_CODE" \
-            ghcr.io/playit-cloud/playit-agent:latest
+            ghcr.io/playit-cloud/playit-agent:1.0
           sleep 20
           docker logs playit-test > agent.log 2>&1 || true
           cat agent.log
@@ -147,7 +147,7 @@ jobs:
           docker rm -f playit-test >/dev/null 2>&1 || true
           docker run -d --name playit-test --net=host \
             -e SECRET_KEY="$secret" \
-            ghcr.io/playit-cloud/playit-agent:latest
+            ghcr.io/playit-cloud/playit-agent:1.0
           sleep 20
           docker logs playit-test 2>&1 | tee -a agent.log || true
 

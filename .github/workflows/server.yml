@@ -105,7 +105,7 @@ jobs:
           docker rm -f playit >/dev/null 2>&1 || true
           docker run -d --name playit --net=host \
             -e SECRET_KEY="$PLAYIT_SECRET" \
-            ghcr.io/playit-cloud/playit-agent:latest
+            ghcr.io/playit-cloud/playit-agent:1.0
 
           echo "waiting for the tunnel..."
           sleep 25

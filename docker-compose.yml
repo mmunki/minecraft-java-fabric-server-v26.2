@@ -23,7 +23,7 @@ services:
     restart: unless-stopped
 
   playit:
-    image: ghcr.io/playit-cloud/playit-agent:latest
+    image: ghcr.io/playit-cloud/playit-agent:1.0
     container_name: playit
     network_mode: host
     environment:
