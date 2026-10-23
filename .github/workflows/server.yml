@@ -122,13 +122,34 @@ jobs:
             exit 1
           fi
 
-          addr="$(grep -Eo '[a-zA-Z0-9.-]+\.(joinmc\.link|playit\.gg|ply\.gg)' playit.log | sort -u | head -1 || true)"
+          # The agent log only contains tunnel counts.  Ask the Playit API for
+          # the tunnel's public display address (the part players connect to).
+          addr=""
+          for i in $(seq 1 24); do
+            api_json="$(curl -sS -X POST https://api.playit.gg/v1/agents/rundata \
+              -H "Authorization: Agent-Key $PLAYIT_SECRET" \
+              -H 'Content-Type: application/json' \
+              -d '{}' || true)"
+            printf '%s\n' "$api_json" > playit-rundata.json
+            addr="$(printf '%s' "$api_json" \
+              | jq -r '[.data.tunnels[]? | select(.tunnel_type == "minecraft-java") | .display_address][0] // empty' 2>/dev/null || true)"
+            [ -n "$addr" ] && break
+            sleep 5
+          done
+
           if [ -n "$addr" ]; then
             echo "JOIN_ADDRESS=$addr" >> "$GITHUB_ENV"
             echo "### Join address: \`$addr\`" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "::warning::could not detect the tunnel address in the agent log"
-            echo "Open https://playit.gg/account/tunnels to see the assigned address."
+            # Fallback for older agents that print the address in their log.
+            addr="$(grep -Eo '[a-zA-Z0-9.-]+\.(joinmc\.link|playit\.gg|ply\.gg)' playit.log | sort -u | head -1 || true)"
+            if [ -n "$addr" ]; then
+              echo "JOIN_ADDRESS=$addr" >> "$GITHUB_ENV"
+              echo "### Join address: \`$addr\`" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::the agent is linked but has no Minecraft tunnel with a public address"
+              echo "Open https://playit.gg/account/tunnels and create a Minecraft Java tunnel to 127.0.0.1:25565."
+            fi
           fi
 
           {
@@ -173,6 +194,7 @@ jobs:
           path: |
             server.log
             playit.log
+            playit-rundata.json
           if-no-files-found: warn
 
       - name: Stop the containers
