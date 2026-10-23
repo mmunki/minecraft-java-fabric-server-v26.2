@@ -111,6 +111,17 @@ jobs:
           sleep 25
           docker logs playit 2>&1 | tee playit.log || true
 
+          if grep -qE 'InvalidAgentKey|no longer valid' playit.log; then
+            echo "::error::Playit rejected PLAYIT_SECRET with InvalidAgentKey."
+            echo "::error::Use a Docker agent secret, not a third-party app setup code."
+            echo "::error::Generate one at https://playit.gg/account/setup/wizard/new-account/docker/docker-name"
+            exit 1
+          fi
+          if ! docker inspect -f '{{.State.Running}}' playit 2>/dev/null | grep -q true; then
+            echo "::error::The Playit agent exited. See playit.log above."
+            exit 1
+          fi
+
           addr="$(grep -Eo '[a-zA-Z0-9.-]+\.(joinmc\.link|playit\.gg|ply\.gg)' playit.log | sort -u | head -1 || true)"
           if [ -n "$addr" ]; then
             echo "JOIN_ADDRESS=$addr" >> "$GITHUB_ENV"
